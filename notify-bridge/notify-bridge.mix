@@ -1,3 +1,4 @@
+-- SPDX-License-Identifier: MIT OR Apache-2.0
 -- version: 0.1.0
 -- Run with mix --serve notify-bridge.mix. Children belong to this generation.
 $ids = {}
@@ -9,9 +10,29 @@ fn variant($value)
   return json_encode($value)
 end
 
+fn remember($id, $ref)
+  send notify notify.present body=json_encode({id: to_number($id), surface: "plasma", ref: $ref})
+  if $rc != 0 then
+    -- Never leave a visible copy without a durable reference.
+    $closed = run_argv(concat($dbus, ["org.freedesktop.Notifications.CloseNotification", $ref]), {timeout: 5})
+    if not $closed.ok then eprint("notify-bridge: failed to close unrecorded toast " .. $ref) end
+    eprint("notify-bridge: notify.present failed for " .. $id)
+    return false
+  end
+  return true
+end
+
+fn sender($n)
+  if ($n.app ?? "") != "" then return $n.app end
+  if ($n.source ?? "") != "" then return $n.source end
+  return "MixOS"
+end
+
 fn show($n, $mapping)
   $key = to_string($n.id)
   if $mapping[$key] != nil then return $mapping end
+  $urgency = $n.urgency ?? "normal"
+  $byte = if $urgency == "critical" then 2 elif $urgency == "low" then 0 else 1 end
   $actions = []
   for $a in $n.actions ?? []
     push($actions, $a.id)
@@ -20,8 +41,8 @@ fn show($n, $mapping)
   if length($actions) > 0 then
     -- Plasma removes actions when their D-Bus sender disconnects. Keep
     -- libnotify's connection alive in a generation-owned child until close.
-    $command = ["notify-send", "--wait", "--print-id", "--app-name", $n.app ?? "MixOS",
-      "--icon", "dev.mixos.tray", "--expire-time", "0",
+    $command = ["notify-send", "--wait", "--print-id", "--app-name", sender($n),
+      "--icon", "dev.mixos.tray", "--urgency", $urgency, "--expire-time", "0",
       "--hint", "boolean:resident:true", "--hint", "string:x-kde-origin-name:MixOS"]
     for $a in $n.actions
       $command = concat($command, ["--action", $a.id .. "=" .. $a.label])
@@ -32,10 +53,10 @@ fn show($n, $mapping)
   end
   -- Explicit as keeps even the empty list typed. Do not invent a default
   -- action: Plasma treats that key as clicking the toast, not a button.
-  $resident = length($actions) > 0
-  $hints = "{'x-kde-origin-name': <'MixOS'>, 'resident': <" .. to_string($resident) .. ">}"
+  $resident = $urgency == "critical"
+  $hints = "{'urgency': <byte " .. to_string($byte) .. ">, 'x-kde-origin-name': <'MixOS'>, 'resident': <" .. to_string($resident) .. ">}"
   $notify_argv = concat($dbus, ["org.freedesktop.Notifications.Notify",
-    variant($n.app ?? $n.source ?? "MixOS"), "0", "dev.mixos.tray",
+    variant(sender($n)), "0", "dev.mixos.tray",
     variant($n.summary), variant($n.body ?? ""), "@as " .. variant($actions),
     $hints, "0"])
   $r = run_argv($notify_argv, {timeout: 5})
@@ -45,6 +66,7 @@ fn show($n, $mapping)
     return $mapping
   end
   $plasma = $matches[0].groups[0]
+  if not remember($key, $plasma) then return $mapping end
   $mapping[$key] = $plasma
   print("notify-bridge: mapped " .. $key .. " -> " .. $plasma)
   return $mapping
@@ -66,6 +88,11 @@ fn reconcile($mapping)
   send notify notify.list
   if $rc != 0 then raise("NOTIFY_LIST", "notify.list failed") end
   for $n in $result
+    $ref = ($n.presented ?? {}).plasma
+    if $ref != nil then
+      $closed = run_argv(concat($dbus, ["org.freedesktop.Notifications.CloseNotification", $ref]), {timeout: 5})
+      if not $closed.ok then raise("PLASMA_CLOSE", "cannot close saved Plasma reference") end
+    end
     $mapping = show($n, $mapping)
   end
   return $mapping
@@ -112,6 +139,11 @@ on proc.line
   if $line.tag == "toast" and not $line.truncated and re_match($line.line, "^[0-9]+$") then
     for $key in keys($ids)
       if $ids[$key] == $line.watch then
+        if not remember($key, $line.line) then
+          $ids = delete($ids, $key)
+          $reverse_ids = invert($ids)
+          return
+        end
         $ids[$key] = $line.line
         print("notify-bridge: mapped " .. $key .. " -> " .. $line.line)
         -- An outcome can arrive before notify-send prints its Plasma id.
