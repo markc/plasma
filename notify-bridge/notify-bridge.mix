@@ -17,10 +17,28 @@ fn show($n, $mapping)
     push($actions, $a.id)
     push($actions, $a.label)
   end
-  $r = run_argv(concat($dbus, ["org.freedesktop.Notifications.Notify",
-    variant($n.app ?? $n.source ?? "MixOS"), "0", "dev.mixos",
-    variant($n.summary), variant($n.body ?? ""), variant($actions),
-    "{'x-kde-origin-name': <'MixOS'>}", to_string($n.timeout_ms ?? 0)]), {timeout: 5})
+  if length($actions) > 0 then
+    -- Plasma removes actions when their D-Bus sender disconnects. Keep
+    -- libnotify's connection alive in a generation-owned child until close.
+    $command = ["notify-send", "--wait", "--print-id", "--app-name", $n.app ?? "MixOS",
+      "--icon", "dev.mixos.tray", "--expire-time", "0",
+      "--hint", "boolean:resident:true", "--hint", "string:x-kde-origin-name:MixOS"]
+    for $a in $n.actions
+      $command = concat($command, ["--action", $a.id .. "=" .. $a.label])
+    end
+    $command = concat($command, ["--", $n.summary, $n.body ?? ""])
+    $mapping[$key] = process_watch($command, {tag: "toast", stderr: "inherit"})
+    return $mapping
+  end
+  -- Explicit as keeps even the empty list typed. Do not invent a default
+  -- action: Plasma treats that key as clicking the toast, not a button.
+  $resident = length($actions) > 0
+  $hints = "{'x-kde-origin-name': <'MixOS'>, 'resident': <" .. to_string($resident) .. ">}"
+  $notify_argv = concat($dbus, ["org.freedesktop.Notifications.Notify",
+    variant($n.app ?? $n.source ?? "MixOS"), "0", "dev.mixos.tray",
+    variant($n.summary), variant($n.body ?? ""), "@as " .. variant($actions),
+    $hints, "0"])
+  $r = run_argv($notify_argv, {timeout: 5})
   $matches = re_find($r.stdout, "uint32 ([0-9]+)")
   if not $r.ok or length($matches) != 1 then
     eprint("notify-bridge: Notify failed: " .. json_encode($r))
@@ -69,6 +87,7 @@ on notification.answered
   $n = json_parse($event.body)
   $key = to_string($n.id)
   if $ids[$key] != nil then
+    if starts_with($ids[$key], "process:") then return end
     $r = run_argv(concat($dbus, ["org.freedesktop.Notifications.CloseNotification", $ids[$key]]), {timeout: 5})
     if not $r.ok then eprint("notify-bridge: CloseNotification failed: " .. json_encode($r)) end
     $ids = delete($ids, $key)
@@ -80,6 +99,7 @@ on notification.closed
   $n = json_parse($event.body)
   $key = to_string($n.id)
   if $ids[$key] != nil then
+    if starts_with($ids[$key], "process:") then return end
     $r = run_argv(concat($dbus, ["org.freedesktop.Notifications.CloseNotification", $ids[$key]]), {timeout: 5})
     if not $r.ok then eprint("notify-bridge: CloseNotification failed: " .. json_encode($r)) end
     $ids = delete($ids, $key)
@@ -89,6 +109,21 @@ end
 
 on proc.line
   $line = $event.args
+  if $line.tag == "toast" and not $line.truncated and re_match($line.line, "^[0-9]+$") then
+    for $key in keys($ids)
+      if $ids[$key] == $line.watch then
+        $ids[$key] = $line.line
+        print("notify-bridge: mapped " .. $key .. " -> " .. $line.line)
+        -- An outcome can arrive before notify-send prints its Plasma id.
+        send notify notify.get body=json_encode({id: to_number($key)})
+        if $rc == 0 and $result.status == "done" then
+          $r = run_argv(concat($dbus, ["org.freedesktop.Notifications.CloseNotification", $line.line]), {timeout: 5})
+          if $r.ok then $ids = delete($ids, $key) end
+        end
+      end
+    end
+    $reverse_ids = invert($ids)
+  end
   if $line.watch == $watch and not $line.truncated then
     $action = re_find($line.line, "org.freedesktop.Notifications.ActionInvoked \\(uint32 ([0-9]+), '([^']*)'\\)")
     $closed = re_find($line.line, "org.freedesktop.Notifications.NotificationClosed \\(uint32 ([0-9]+), uint32 ([0-9]+)\\)")

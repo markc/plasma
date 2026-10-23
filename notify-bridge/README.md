@@ -5,9 +5,12 @@ dismissals settle the original notification; outcomes elsewhere close the
 Plasma copy. Expiry remains notifyd's responsibility. Open notifications are
 reconciled after subscribing at startup.
 
-Requires a graphical session, `gdbus`, local notifyd and Mix with
+Requires a graphical session, `gdbus`, `notify-send` (libnotify), local notifyd and Mix with
 `process_watch` (MixOS commit `97b82fdb`, pending gold). No build is needed.
-The icon is `dev.mixos`; Plasma supplies its default icon when unavailable.
+The icon is `dev.mixos.tray`, the existing MixOS tray artwork in
+`icons/hicolor/scalable/apps/dev.mixos.tray.svg`. Install that SVG into the
+matching user or system hicolor icon directory if it is not already there.
+`dev.mixos` is not the installed icon name.
 
 ## Install
 
@@ -32,8 +35,18 @@ Uses only the published [notifyd contract](https://github.com/markc/mixos/blob/m
 The local Bus service is `notify-bridge`; `notify-bridge.status` reports the
 two id maps and watcher handle for diagnosis.
 
-Uses `org.freedesktop.Notifications.Notify` and `CloseNotification` via
-direct `gdbus` argv calls. A managed `gdbus monitor` supplies signals without
+Uses `org.freedesktop.Notifications.Notify` through `gdbus` for plain toasts
+and a generation-owned `notify-send --wait --print-id` child for questions.
+Plasma removes action buttons when the sending D-Bus connection disappears:
+a one-shot `gdbus call` sends a valid alternating string array but exits too
+soon. `notify-send` keeps that connection alive until the toast closes.
+Its printed id establishes the mapping; a pending outcome is checked again
+when the id arrives. No desktop entry or synthetic `default` action is needed.
+Questions set `resident=true` and `expire_timeout=0`; notifyd's published
+record currently has no urgency or level field. All Plasma copies use timeout
+0, with expiry controlled by notifyd (an explicit notifyd deadline can still
+settle a question). `CloseNotification` uses direct `gdbus` argv.
+A managed `gdbus monitor` supplies signals without
 polling. Only mapped ids are handled. Close reasons 1 and 3 send no outcome.
 A dead monitor is logged and restarted after 0.5 seconds. Queue overflow and
 D-Bus call failures are logged. Failed Notify calls are retried on the next
