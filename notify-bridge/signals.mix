@@ -1,0 +1,65 @@
+-- SPDX-License-Identifier: MIT OR Apache-2.0
+-- Decode the quoted strings printed by GVariant, without executing input.
+fn monitor_delay($started_at, $now, $previous)
+  return if $now - $started_at >= 60 then 0.5 else $previous ?? 0.5 end
+end
+
+fn unquote($text)
+  $quote = slice($text, 0, 1)
+  if not contains(["'", "\""], $quote) or slice($text, -1) != $quote then return nil end
+  $out = ""
+  $i = 1
+  while $i < length($text) - 1
+    $c = slice($text, $i, $i + 1)
+    $i = $i + 1
+    if $c == "\\" then
+      if $i >= length($text) - 1 then return nil end
+      $c = slice($text, $i, $i + 1)
+      $i = $i + 1
+      $escapes = {n: "\n", r: "\r", t: "\t", b: chr(8), f: chr(12), v: chr(11)}
+      if $escapes[$c] != nil then
+        $c = $escapes[$c]
+      elif re_match($c, "^[0-7]$") then
+        $octal = $c
+        for $j = 1 to 2
+          $next = slice($text, $i, $i + 1)
+          if re_match($next, "^[0-7]$") then
+            $octal = $octal .. $next
+            $i = $i + 1
+          end
+        end
+        $value = 0
+        for $position = 0 to length($octal) - 1
+          $value = $value * 8 + to_number(slice($octal, $position, $position + 1))
+        end
+        $c = chr($value)
+      elif not contains(["\\", "'", "\""], $c) then
+        return nil
+      end
+    elif $c == $quote then
+      return nil
+    end
+    $out = $out .. $c
+  end
+  return $out
+end
+
+fn parse_action($line)
+  $matches = re_find($line, "org.freedesktop.Notifications.ActionInvoked \\(uint32 ([0-9]+), (.*)\\)$")
+  if length($matches) != 1 then return nil end
+  $groups = $matches[0].groups
+  $key = unquote($groups[1])
+  if $key == nil then return nil end
+  return {ref: $groups[0], key: $key}
+end
+
+fn owner_changed($line)
+  $matches = re_find($line, "org.freedesktop.DBus.NameOwnerChanged \\((.*), (.*), (.*)\\)$")
+  if length($matches) != 1 then return nil end
+  $groups = $matches[0].groups
+  if unquote($groups[0]) != "org.freedesktop.Notifications" then return nil end
+  $old = unquote($groups[1])
+  $new = unquote($groups[2])
+  if $old == nil or $new == nil or $old == $new then return nil end
+  return $new
+end

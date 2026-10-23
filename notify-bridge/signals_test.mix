@@ -1,0 +1,26 @@
+-- SPDX-License-Identifier: MIT OR Apache-2.0
+$signals = require("signals.mix")
+fn check($name, $actual, $expected)
+  if not deep_eq($actual, $expected) then
+    raise("TEST_FAILED", $name .. ": " .. json_encode($actual))
+  end
+  print("PASS " .. $name)
+end
+check("single quotes", $signals.parse_action("org.freedesktop.Notifications.ActionInvoked (uint32 42, 'yes')"), {ref: "42", key: "yes"})
+check("double quotes containing apostrophe", $signals.parse_action("org.freedesktop.Notifications.ActionInvoked (uint32 42, \"it's\")"), {ref: "42", key: "it's"})
+check("escaped quote and backslash", $signals.unquote("'a\\'b\\\\c'"), "a'b\\c")
+check("escaped double quote", $signals.unquote("\"a\\\"b\""), "a\"b")
+check("control escapes", $signals.unquote("'a\\n\\t\\101'"), "a\n\tA")
+check("invalid escape", $signals.unquote("'a\\q'"), nil)
+check("unmatched signal", $signals.parse_action("unrelated"), nil)
+check("owner acquisition", $signals.owner_changed("org.freedesktop.DBus.NameOwnerChanged ('org.freedesktop.Notifications', '', ':1.123')"), ":1.123")
+check("owner loss", $signals.owner_changed("org.freedesktop.DBus.NameOwnerChanged ('org.freedesktop.Notifications', ':1.123', '')"), "")
+check("unrelated owner", $signals.owner_changed("org.freedesktop.DBus.NameOwnerChanged ('example.other', '', ':1.123')"), nil)
+$delay = nil
+for $expected in [0.5, 1, 2, 4, 8, 16, 30, 30]
+  $actual = $signals.monitor_delay(0, 1, $delay)
+  check("restart delay " .. to_string($expected), $actual, $expected)
+  $delay = min(30, $actual * 2)
+end
+check("healthy minute resets backoff", $signals.monitor_delay(0, 60, 30), 0.5)
+check("just short of minute keeps backoff", $signals.monitor_delay(0, 59.99, 30), 30)

@@ -1,21 +1,47 @@
 -- SPDX-License-Identifier: MIT OR Apache-2.0
 -- version: 0.1.0
 -- Run with mix --serve notify-bridge.mix. Children belong to this generation.
+$signals = require("signals.mix")
 $ids = {}
 $reverse_ids = {}
 $watch = nil
+$owner_watch = nil
+$children = {}
+$backoff = {}
+$started = {}
+$pending_file = env("XDG_RUNTIME_DIR", env("HOME") .. "/.local/state/mixos") .. "/notify-bridge-pending.json"
+if is_reload_candidate() and is_file($pending_file) then
+  if length(json_parse(read_file($pending_file))) > 0 then
+    raise("PRESENT_PENDING", "retry reload after notify-send has printed its id")
+  end
+end
 $dbus = ["gdbus", "call", "--session", "--dest", "org.freedesktop.Notifications", "--object-path", "/org/freedesktop/Notifications", "--method"]
 
 fn variant($value)
   return json_encode($value)
 end
 
+fn pending($children)
+  $waiting = filter(keys($children), fn($w) = $children[$w].ref == nil)
+  mkdir(dirname($pending_file), {parents: true})
+  write_atomic($pending_file, json_encode($waiting))
+end
+
+fn close_ref($ref)
+  if $ref == nil or starts_with($ref, "process:") then return end
+  try
+    $r = run_argv(concat($dbus, ["org.freedesktop.Notifications.CloseNotification", $ref]), {timeout: 5})
+    if not $r.ok then eprint("notify-bridge: CloseNotification failed: " .. json_encode($r)) end
+  catch $message
+    eprint("notify-bridge: CloseNotification failed: " .. $message)
+  end
+end
+
 fn remember($id, $ref)
   send notify notify.present body=json_encode({id: to_number($id), surface: "plasma", ref: $ref})
   if $rc != 0 then
     -- Never leave a visible copy without a durable reference.
-    $closed = run_argv(concat($dbus, ["org.freedesktop.Notifications.CloseNotification", $ref]), {timeout: 5})
-    if not $closed.ok then eprint("notify-bridge: failed to close unrecorded toast " .. $ref) end
+    close_ref($ref)
     eprint("notify-bridge: notify.present failed for " .. $id)
     return false
   end
@@ -28,7 +54,7 @@ fn sender($n)
   return "MixOS"
 end
 
-fn show($n, $mapping)
+fn show($n, $mapping, $child_count)
   $key = to_string($n.id)
   if $mapping[$key] != nil then return $mapping end
   $urgency = $n.urgency ?? "normal"
@@ -38,7 +64,7 @@ fn show($n, $mapping)
     push($actions, $a.id)
     push($actions, $a.label)
   end
-  if length($actions) > 0 then
+  if length($actions) > 0 and $child_count < 20 then
     -- Plasma removes actions when their D-Bus sender disconnects. Keep
     -- libnotify's connection alive in a generation-owned child until close.
     $command = ["notify-send", "--wait", "--print-id", "--app-name", sender($n),
@@ -50,6 +76,10 @@ fn show($n, $mapping)
     $command = concat($command, ["--", $n.summary, $n.body ?? ""])
     $mapping[$key] = process_watch($command, {tag: "toast", stderr: "inherit"})
     return $mapping
+  end
+  if length($actions) > 0 then
+    eprint("notify-bridge: question child cap reached; plain toast for " .. $key)
+    $actions = []
   end
   -- Explicit as keeps even the empty list typed. Do not invent a default
   -- action: Plasma treats that key as clicking the toast, not a button.
@@ -75,7 +105,7 @@ end
 fn invert($mapping)
   $back = {}
   for $key in keys($mapping)
-    if $mapping[$key] != nil then $back[$mapping[$key]] = $key end
+    if $mapping[$key] != nil and not starts_with($mapping[$key], "process:") then $back[$mapping[$key]] = $key end
   end
   return $back
 end
@@ -84,29 +114,62 @@ fn start_watch()
   return process_watch(["gdbus", "monitor", "--session", "--dest", "org.freedesktop.Notifications"], {tag: "notifications", stderr: "inherit"})
 end
 
-fn reconcile($mapping)
-  send notify notify.list
-  if $rc != 0 then raise("NOTIFY_LIST", "notify.list failed") end
-  for $n in $result
-    $ref = ($n.presented ?? {}).plasma
-    if $ref != nil then
-      $closed = run_argv(concat($dbus, ["org.freedesktop.Notifications.CloseNotification", $ref]), {timeout: 5})
-      if not $closed.ok then raise("PLASMA_CLOSE", "cannot close saved Plasma reference") end
-    end
-    $mapping = show($n, $mapping)
+fn start_owner_watch()
+  -- Opt-in stdout fixture for testing owner changes without touching Plasma.
+  $fixture = env("NOTIFY_BRIDGE_OWNER_FIXTURE", "")
+  if $fixture != "" then
+    return process_watch(["/opt/mixos/bin/mix", $fixture], {tag: "owners", stderr: "inherit"})
   end
-  return $mapping
+  return process_watch(["gdbus", "monitor", "--session", "--dest", "org.freedesktop.DBus"], {tag: "owners", stderr: "inherit"})
+end
+
+fn reconcile($mapping, $children, $close_saved)
+  send notify notify.list
+  if $rc != 0 then
+    eprint("notify-bridge: notify.list failed")
+    return {ids: $mapping, children: $children}
+  end
+  $records = $result
+  if $close_saved then
+    for $n in $records
+      close_ref(($n.presented ?? {}).plasma)
+    end
+  end
+  for $n in $records
+    $mapping = show($n, $mapping, length($children))
+    -- Count each spawned child before deciding how to show the next record.
+    $children = track($mapping, $children)
+  end
+  return {ids: $mapping, children: $children}
+end
+
+fn track($mapping, $tracked)
+  for $key in keys($mapping)
+    $ref = $mapping[$key]
+    if starts_with($ref, "process:") and $tracked[$ref] == nil then
+      $tracked[$ref] = {id: $key, ref: nil}
+    end
+  end
+  pending($tracked)
+  return $tracked
 end
 
 on lifecycle.commit
   subscribe("notify.changed")
   $watch = start_watch()
-  $ids = reconcile($ids)
+  $owner_watch = start_owner_watch()
+  $started[$watch] = time()
+  $started[$owner_watch] = time()
+  $reconciled = reconcile($ids, $children, true)
+  $ids = $reconciled.ids
+  $children = $reconciled.children
+  $children = track($ids, $children)
   $reverse_ids = invert($ids)
 end
 
 on notification.created
-  $ids = show(json_parse($event.body), $ids)
+  $ids = show(json_parse($event.body), $ids, length($children))
+  $children = track($ids, $children)
   $reverse_ids = invert($ids)
 end
 
@@ -114,9 +177,7 @@ on notification.answered
   $n = json_parse($event.body)
   $key = to_string($n.id)
   if $ids[$key] != nil then
-    if starts_with($ids[$key], "process:") then return end
-    $r = run_argv(concat($dbus, ["org.freedesktop.Notifications.CloseNotification", $ids[$key]]), {timeout: 5})
-    if not $r.ok then eprint("notify-bridge: CloseNotification failed: " .. json_encode($r)) end
+    close_ref($ids[$key])
     $ids = delete($ids, $key)
     $reverse_ids = invert($ids)
   end
@@ -126,9 +187,7 @@ on notification.closed
   $n = json_parse($event.body)
   $key = to_string($n.id)
   if $ids[$key] != nil then
-    if starts_with($ids[$key], "process:") then return end
-    $r = run_argv(concat($dbus, ["org.freedesktop.Notifications.CloseNotification", $ids[$key]]), {timeout: 5})
-    if not $r.ok then eprint("notify-bridge: CloseNotification failed: " .. json_encode($r)) end
+    close_ref($ids[$key])
     $ids = delete($ids, $key)
     $reverse_ids = invert($ids)
   end
@@ -136,41 +195,65 @@ end
 
 on proc.line
   $line = $event.args
-  if $line.tag == "toast" and not $line.truncated and re_match($line.line, "^[0-9]+$") then
-    for $key in keys($ids)
-      if $ids[$key] == $line.watch then
-        if not remember($key, $line.line) then
-          $ids = delete($ids, $key)
-          $reverse_ids = invert($ids)
-          return
-        end
-        $ids[$key] = $line.line
-        print("notify-bridge: mapped " .. $key .. " -> " .. $line.line)
-        -- An outcome can arrive before notify-send prints its Plasma id.
-        send notify notify.get body=json_encode({id: to_number($key)})
-        if $rc == 0 and $result.status == "done" then
-          $r = run_argv(concat($dbus, ["org.freedesktop.Notifications.CloseNotification", $line.line]), {timeout: 5})
-          if $r.ok then $ids = delete($ids, $key) end
-        end
+  if $children[$line.watch] != nil and not $line.truncated then
+    $key = $children[$line.watch].id
+    if re_match($line.line, "^[0-9]+$") and $children[$line.watch].ref == nil then
+      $children[$line.watch].ref = $line.line
+      pending($children)
+      if not remember($key, $line.line) then
+        $ids = delete($ids, $key)
+        $reverse_ids = invert($ids)
+        return
       end
+      $ids[$key] = $line.line
+      print("notify-bridge: mapped " .. $key .. " -> " .. $line.line)
+      -- An outcome can arrive before notify-send prints its Plasma id.
+      send notify notify.get body=json_encode({id: to_number($key)})
+      if $rc == 0 and $result.status == "done" then
+        close_ref($line.line)
+        $ids = delete($ids, $key)
+      end
+    elif trim($line.line) != "" then
+      -- libnotify prints the chosen key, even when the click precedes its id.
+      send notify notify.action body=json_encode({id: to_number($key), action: $line.line})
     end
     $reverse_ids = invert($ids)
   end
   if $line.watch == $watch and not $line.truncated then
-    $action = re_find($line.line, "org.freedesktop.Notifications.ActionInvoked \\(uint32 ([0-9]+), '([^']*)'\\)")
+    $action = $signals.parse_action($line.line)
     $closed = re_find($line.line, "org.freedesktop.Notifications.NotificationClosed \\(uint32 ([0-9]+), uint32 ([0-9]+)\\)")
-    if length($action) == 1 then
-      $g = $action[0].groups
-      $id = $reverse_ids[$g[0]]
+    if $action != nil then
+      $id = $reverse_ids[$action.ref]
       if $id != nil then
-        send notify notify.action body=json_encode({id: to_number($id), action: $g[1]})
+        send notify notify.action body=json_encode({id: to_number($id), action: $action.key})
       end
     elif length($closed) == 1 then
       $g = $closed[0].groups
       $id = $reverse_ids[$g[0]]
-      if $id != nil and $g[1] == "2" then
-        send notify notify.dismiss body=json_encode({id: to_number($id)})
+      if $id != nil then
+        $ids = delete($ids, $id)
+        $reverse_ids = invert($ids)
+        if $g[1] == "2" then
+          send notify notify.dismiss body=json_encode({id: to_number($id)})
+        end
       end
+    end
+  end
+  $new_owner = if $line.watch == $owner_watch and not $line.truncated then $signals.owner_changed($line.line) else nil end
+  if $new_owner != nil then
+    -- The old ids belong to a dead server. Never close them on the new owner.
+    for $child in keys($children)
+      $ignored = process_unwatch($child)
+    end
+    $children = {}
+    pending($children)
+    $ids = {}
+    $reverse_ids = {}
+    if $new_owner != "" then
+      $reconciled = reconcile($ids, $children, false)
+      $ids = $reconciled.ids
+      $children = $reconciled.children
+      $reverse_ids = invert($ids)
     end
   end
 end
@@ -179,22 +262,53 @@ on proc.overflow
   eprint("notify-bridge: signal queue overflow: " .. $event.body)
 end
 
-on proc.watch_exited async
-  if $event.args.watch == $watch then
-    eprint("notify-bridge: gdbus exited; restarting in 0.5s: " .. $event.body)
-    sleep(0.5)
+on proc.watch_exited
+  $handle = $event.args.watch
+  if $children[$handle] != nil then
+    $key = $children[$handle].id
+    $ids = delete($ids, $key)
+    $reverse_ids = invert($ids)
+    $children = delete($children, $handle)
+    pending($children)
+    -- No stdout action and no reason-2 signal means no inferred human choice.
+  end
+  if $handle == $watch or $handle == $owner_watch then
+    $delay = $signals.monitor_delay($started[$handle] ?? time(), time(), $backoff[$event.args.tag])
+    $backoff[$event.args.tag] = min(30, $delay * 2)
+    $started = delete($started, $handle)
+    eprint("notify-bridge: monitor exited; restarting in " .. to_string($delay) .. "s")
+    task_start("monitor.restart", json_encode({watch: $handle, delay: $delay}))
+  end
+end
+
+on monitor.restart async
+  sleep($event.args.delay)
+end
+
+on monitor.restart
+  $handle = $event.args.watch
+  if $handle == $watch then
     $watch = start_watch()
-    print("notify-bridge: gdbus watch restarted")
+    $started[$watch] = time()
+  elif $handle == $owner_watch then
+    $owner_watch = start_owner_watch()
+    $started[$owner_watch] = time()
   end
 end
 
 on @.status
-  reply(json_encode({ids: $ids, reverse_ids: $reverse_ids, watch: $watch}))
+  reply(json_encode({ids: $ids, reverse_ids: $reverse_ids, children: $children, watch: $watch, owner_watch: $owner_watch}))
 end
 
 if not is_reload_candidate() then
   subscribe("notify.changed")
   $watch = start_watch()
-  $ids = reconcile($ids)
+  $owner_watch = start_owner_watch()
+  $started[$watch] = time()
+  $started[$owner_watch] = time()
+  $reconciled = reconcile($ids, $children, true)
+  $ids = $reconciled.ids
+  $children = $reconciled.children
+  pending($children)
   $reverse_ids = invert($ids)
 end

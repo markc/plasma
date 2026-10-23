@@ -1,0 +1,14 @@
+-- SPDX-License-Identifier: MIT OR Apache-2.0
+-- Test-only stdout source. Write one GVariant signal line to the input file.
+$input = env("NOTIFY_BRIDGE_OWNER_INPUT")
+$previous = ""
+loop
+  if is_file($input) then
+    $line = trim(read_file($input))
+    if $line != $previous and $line != "" then
+      print($line)
+      $previous = $line
+    end
+  end
+  sleep(0.05)
+end
