@@ -49,6 +49,10 @@ without an action or a reason-2 close signal, no human choice is inferred.
 At most 20 question children run concurrently. Further questions remain
 recorded and appear as plain toasts, with a logged warning. They can still
 be answered through notifyd's other surfaces.
+For regression tests, `NOTIFY_BRIDGE_MAX_CHILDREN` lowers the cap: set it to
+`3` and send five questions to get three action children and two plain toasts.
+Unset or empty, it defaults to `20` and accepts only integers from `0` to `20`; invalid values
+refuse startup. Leave it unset in normal operation.
 No desktop entry or synthetic `default` action is needed.
 Urgency maps `low`, `normal` and `critical` to the D-Bus byte hint 0, 1 and 2.
 Critical toasts and questions with action children set `resident=true` and `expire_timeout=0`.

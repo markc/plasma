@@ -1,6 +1,10 @@
 -- SPDX-License-Identifier: MIT OR Apache-2.0
 -- version: 0.1.0
 -- Run with mix --serve notify-bridge.mix. Children belong to this generation.
+$max_children = to_number(env("NOTIFY_BRIDGE_MAX_CHILDREN", "20"))
+if $max_children == nil or $max_children < 0 or $max_children > 20 or floor($max_children) != $max_children then
+  raise("USAGE", "NOTIFY_BRIDGE_MAX_CHILDREN must be an integer from 0 to 20")
+end
 $signals = require("signals.mix")
 $ids = {}
 $reverse_ids = {}
@@ -64,7 +68,7 @@ fn show($n, $mapping, $child_count)
     push($actions, $a.id)
     push($actions, $a.label)
   end
-  if length($actions) > 0 and $child_count < 20 then
+  if length($actions) > 0 and $child_count < $max_children then
     -- Plasma removes actions when their D-Bus sender disconnects. Keep
     -- libnotify's connection alive in a generation-owned child until close.
     $command = ["notify-send", "--wait", "--print-id", "--app-name", sender($n),
