@@ -19,10 +19,8 @@ It is read-only. Starting, stopping and log actions are not in this version.
 
 ## Build and test
 
-Rust builds run on the cbc workers, not on the desk:
-
 ```
-mix _bin/cbc-build.mix --worker cbc2 --repo mixos -- cargo test -p tray
+cargo test -p tray
 ```
 
 ## Not yet
