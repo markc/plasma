@@ -1,0 +1,133 @@
+-- version: 0.1.0
+-- Run with mix --serve notify-bridge.mix. Children belong to this generation.
+$ids = {}
+$reverse_ids = {}
+$watch = nil
+$dbus = ["gdbus", "call", "--session", "--dest", "org.freedesktop.Notifications", "--object-path", "/org/freedesktop/Notifications", "--method"]
+
+fn variant($value)
+  return json_encode($value)
+end
+
+fn show($n, $mapping)
+  $key = to_string($n.id)
+  if $mapping[$key] != nil then return $mapping end
+  $actions = []
+  for $a in $n.actions ?? []
+    push($actions, $a.id)
+    push($actions, $a.label)
+  end
+  $r = run_argv(concat($dbus, ["org.freedesktop.Notifications.Notify",
+    variant($n.app ?? $n.source ?? "MixOS"), "0", "dev.mixos",
+    variant($n.summary), variant($n.body ?? ""), variant($actions),
+    "{'x-kde-origin-name': <'MixOS'>}", to_string($n.timeout_ms ?? 0)]), {timeout: 5})
+  $matches = re_find($r.stdout, "uint32 ([0-9]+)")
+  if not $r.ok or length($matches) != 1 then
+    eprint("notify-bridge: Notify failed: " .. json_encode($r))
+    return $mapping
+  end
+  $plasma = $matches[0].groups[0]
+  $mapping[$key] = $plasma
+  print("notify-bridge: mapped " .. $key .. " -> " .. $plasma)
+  return $mapping
+end
+
+fn invert($mapping)
+  $back = {}
+  for $key in keys($mapping)
+    if $mapping[$key] != nil then $back[$mapping[$key]] = $key end
+  end
+  return $back
+end
+
+fn start_watch()
+  return process_watch(["gdbus", "monitor", "--session", "--dest", "org.freedesktop.Notifications"], {tag: "notifications", stderr: "inherit"})
+end
+
+fn reconcile($mapping)
+  send notify notify.list
+  if $rc != 0 then raise("NOTIFY_LIST", "notify.list failed") end
+  for $n in $result
+    $mapping = show($n, $mapping)
+  end
+  return $mapping
+end
+
+on lifecycle.commit
+  subscribe("notify.changed")
+  $watch = start_watch()
+  $ids = reconcile($ids)
+  $reverse_ids = invert($ids)
+end
+
+on notification.created
+  $ids = show(json_parse($event.body), $ids)
+  $reverse_ids = invert($ids)
+end
+
+on notification.answered
+  $n = json_parse($event.body)
+  $key = to_string($n.id)
+  if $ids[$key] != nil then
+    $r = run_argv(concat($dbus, ["org.freedesktop.Notifications.CloseNotification", $ids[$key]]), {timeout: 5})
+    if not $r.ok then eprint("notify-bridge: CloseNotification failed: " .. json_encode($r)) end
+    $ids = delete($ids, $key)
+    $reverse_ids = invert($ids)
+  end
+end
+
+on notification.closed
+  $n = json_parse($event.body)
+  $key = to_string($n.id)
+  if $ids[$key] != nil then
+    $r = run_argv(concat($dbus, ["org.freedesktop.Notifications.CloseNotification", $ids[$key]]), {timeout: 5})
+    if not $r.ok then eprint("notify-bridge: CloseNotification failed: " .. json_encode($r)) end
+    $ids = delete($ids, $key)
+    $reverse_ids = invert($ids)
+  end
+end
+
+on proc.line
+  $line = $event.args
+  if $line.watch == $watch and not $line.truncated then
+    $action = re_find($line.line, "org.freedesktop.Notifications.ActionInvoked \\(uint32 ([0-9]+), '([^']*)'\\)")
+    $closed = re_find($line.line, "org.freedesktop.Notifications.NotificationClosed \\(uint32 ([0-9]+), uint32 ([0-9]+)\\)")
+    if length($action) == 1 then
+      $g = $action[0].groups
+      $id = $reverse_ids[$g[0]]
+      if $id != nil then
+        send notify notify.action body=json_encode({id: to_number($id), action: $g[1]})
+      end
+    elif length($closed) == 1 then
+      $g = $closed[0].groups
+      $id = $reverse_ids[$g[0]]
+      if $id != nil and $g[1] == "2" then
+        send notify notify.dismiss body=json_encode({id: to_number($id)})
+      end
+    end
+  end
+end
+
+on proc.overflow
+  eprint("notify-bridge: signal queue overflow: " .. $event.body)
+end
+
+on proc.watch_exited async
+  if $event.args.watch == $watch then
+    eprint("notify-bridge: gdbus exited; restarting in 0.5s: " .. $event.body)
+    sleep(0.5)
+    $watch = start_watch()
+    print("notify-bridge: gdbus watch restarted")
+  end
+end
+
+on @.status
+  reply(json_encode({ids: $ids, reverse_ids: $reverse_ids, watch: $watch}))
+end
+
+if not is_reload_candidate() then
+  subscribe("notify.changed")
+  $watch = start_watch()
+  $ids = reconcile($ids)
+  $reverse_ids = invert($ids)
+end

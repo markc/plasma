@@ -13,6 +13,7 @@ its site. The native MixOS desktop has its own versions of these tools.
 
 | Path | What |
 |---|---|
+| [`notify-bridge/`](notify-bridge/) | MixOS notifyd notifications as native Plasma toasts, with actions and dismissals |
 | [`mixtray/`](mixtray/) | MixTray: a Plasma 6 tray plasmoid with four tabs (COS, BUS, MIX, SSH), fed by MixOS's `mixtrayd` |
 | [`tray/`](tray/) | `tray`: a StatusNotifierItem in Rust that shows MixOS unit state in Plasma's tray |
 | [`icons/`](icons/) | Shared icons, in the hicolor layout (`dev.mixos.tray`) |

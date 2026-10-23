@@ -1,5 +1,8 @@
 # notify-bridge: blocked on child stdout events
 
+Resolved by MixOS `process_watch` in `97b82fdb` (pending gold). The bridge
+now uses that primitive; the evidence below records the original gap.
+
 The bridge cannot yet be implemented with the published Mix 0.117.0
 primitives. The brief requires stopping at this gate rather than introducing
 polling or another implementation language. No bridge or user unit is installed.
