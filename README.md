@@ -1,40 +1,41 @@
 # plasma
 
-KDE Plasma (KWin) add-ons for [MixOS](https://mixos.dev) users who run
-Plasma beside, or instead of, the MixOS desktop.
+KDE Plasma (KWin) compatibility apps for MixOS: small tools that bring MixOS
+state and controls to people who run Plasma instead of, or beside, the MixOS
+desktop.
 
-These are low-priority extras. They depend on MixOS services installed
-under `/opt/mixos`, and they get dropped if keeping them current gets
-awkward. The native MixOS desktop (compd + egui) versions live in
-[markc/mixos](https://github.com/markc/mixos).
+This is a separate project from [MixOS](https://github.com/markc/mixos),
+with its own releases and pace. It uses MixOS services from outside, through
+their command-line and Bus interfaces, and is not part of the MixOS tree or
+its site. The native MixOS desktop has its own versions of these tools.
+
+## Apps
 
 | Path | What |
 |---|---|
-| [`mixtray/`](mixtray/) | MixTray: a Plasma 6 plasmoid with four tabs (COS, BUS, MIX, SSH), fed by `mixtrayd` |
+| [`mixtray/`](mixtray/) | MixTray: a Plasma 6 tray plasmoid with four tabs (COS, BUS, MIX, SSH), fed by MixOS's `mixtrayd` |
 | [`tray/`](tray/) | `tray`: a StatusNotifierItem in Rust that shows MixOS unit state in Plasma's tray |
+| [`icons/`](icons/) | Shared icons, in the hicolor layout (`dev.mixos.tray`) |
 
-Both moved here from `markc/mixos` (`apps/mixtray`, `apps/tray`) on
-2026-10-23, with their history.
+More Plasma apps may be added over time. Each one gets its own top-level
+directory and README.
 
-## MixTray
+## Build
 
-It needs `mixtrayd` from MixOS at `/opt/mixos/bin/mixtrayd`, running as a
-user service. Install or upgrade the plasmoid with:
-
-```
-kpackagetool6 -t Plasma/Applet -i mixtray/package
-kpackagetool6 -t Plasma/Applet -u mixtray/package
-```
-
-Then add "MixTray" to the system tray (System Tray Settings, Entries).
-
-## tray
-
-See [`tray/README.md`](tray/README.md). It is a Cargo workspace member:
+The Rust apps are members of one Cargo workspace:
 
 ```
-cargo build --release -p tray
+cargo build --release
+cargo test
 ```
+
+The QML plasmoids need no build step. Each one's README covers installing
+it.
+
+## History
+
+`mixtray` and `tray` started in `markc/mixos` as `apps/mixtray` and
+`apps/tray`. They moved here on 2026-10-23, with their history.
 
 ## Licence
 
