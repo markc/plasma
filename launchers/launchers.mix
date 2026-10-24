@@ -1,0 +1,172 @@
+#!/opt/mixos/bin/mix
+-- Plasma launchers for the installed MixOS apps.
+-- version: 0.1.0
+--
+--   mix launchers/launchers.mix install   write a launcher and icon for every MixOS app
+--   mix launchers/launchers.mix remove    delete every launcher and icon this script wrote
+--   mix launchers/launchers.mix check     list what is installed and what is stale
+--
+-- The source is MixOS's own published entries in $MIXOS_PREFIX/share/applications
+-- (default /opt/mixos), so a new MixOS app gets a launcher on the next install.
+-- Each launcher is a separate desktop id (dev.mixos.<app>-plasma) with OnlyShowIn=KDE,
+-- so a MixOS session that shares this home never lists it, and the MixOS entry of
+-- the same app is never shadowed.
+
+$prefix = env("MIXOS_PREFIX", "/opt/mixos")
+$home = env("HOME")
+$data = env("XDG_DATA_HOME", $home .. "/.local/share")
+$apps_dir = $data .. "/applications"
+$icons_dir = $data .. "/icons/hicolor/scalable/apps"
+$marker = "X-MixOS-Plasma-Launcher=true"
+
+-- The MixOS app icons draw with stroke="currentColor". KDE recolours an SVG that
+-- carries its colour-scheme stylesheet, so the icon follows Breeze light or dark.
+$style = "<style id=\"current-color-scheme\" type=\"text/css\">.ColorScheme-Text { color: #fcfcfc; }</style>"
+
+fn app_of($path)
+    return replace(replace(basename($path), "dev.mixos.", ""), ".desktop", "")
+end
+
+-- Exec=term %F -> Exec=/opt/mixos/bin/term %F (Plasma's PATH has no /opt/mixos/bin).
+fn absolute($line, $key)
+    $rest = trim(replace($line, $key .. "=", ""))
+    if starts_with($rest, "/") then
+        return $line
+    end
+    return $key .. "=" .. $prefix .. "/bin/" .. $rest
+end
+
+fn launcher($src, $app)
+    $out = []
+    $in_entry = false
+    for $line in split(read_file($src), "\n")
+        if starts_with($line, "#") then
+            continue
+        end
+        if starts_with($line, "[") then
+            $in_entry = $line == "[Desktop Entry]"
+        end
+        if starts_with($line, "Exec=") then
+            $line = absolute($line, "Exec")
+        elif starts_with($line, "TryExec=") then
+            $line = absolute($line, "TryExec")
+        elif starts_with($line, "Icon=") then
+            $line = "Icon=dev.mixos." .. $app .. "-plasma"
+        elif starts_with($line, "OnlyShowIn=") or starts_with($line, "NotShowIn=") then
+            continue
+        end
+        push($out, $line)
+        if $in_entry and $line == "[Desktop Entry]" then
+            push($out, "OnlyShowIn=KDE;")
+            push($out, $marker)
+        end
+    end
+    return trim(join($out, "\n")) .. "\n"
+end
+
+fn icon($app)
+    $src = $prefix .. "/share/icons/mixos/scalable/apps/dev.mixos." .. $app .. "-symbolic.svg"
+    if !exists($src) then
+        $src = $prefix .. "/share/icons/mixos/scalable/apps/dev.mixos.svg"
+    end
+    $svg = read_file($src)
+    if contains($svg, "current-color-scheme") then
+        return $svg
+    end
+    $svg = re_replace($svg, "<svg\\b", "<svg class=\"ColorScheme-Text\"")
+    return re_replace($svg, "(<svg[^>]*>)", "$1" .. $style)
+end
+
+fn ours()
+    $found = []
+    for $p in glob($apps_dir .. "/dev.mixos.*-plasma.desktop")
+        if contains(read_file($p), $marker) then
+            push($found, $p)
+        end
+    end
+    return $found
+end
+
+fn refresh()
+    if which("update-desktop-database") != nil then
+        run_argv(["update-desktop-database", $apps_dir])
+    end
+    if which("kbuildsycoca6") != nil then
+        run_argv(["kbuildsycoca6"], {stdout: "null", stderr: "null"})
+    end
+end
+
+fn sources()
+    $list = glob($prefix .. "/share/applications/dev.mixos.*.desktop")
+    if len($list) == 0 then
+        print("ERROR: no MixOS app entries in " .. $prefix .. "/share/applications")
+        exit(1)
+    end
+    return $list
+end
+
+fn install()
+    mkdir($apps_dir)
+    mkdir($icons_dir)
+    $wanted = []
+    for $src in sources()
+        $app = app_of($src)
+        $dst = $apps_dir .. "/dev.mixos." .. $app .. "-plasma.desktop"
+        push($wanted, $dst)
+        write_file($dst, launcher($src, $app))
+        write_file($icons_dir .. "/dev.mixos." .. $app .. "-plasma.svg", icon($app))
+        print("installed " .. $app)
+    end
+    -- An app MixOS no longer ships loses its launcher.
+    for $p in ours()
+        if !contains($wanted, $p) then
+            remove($p)
+            remove($icons_dir .. "/" .. replace(basename($p), ".desktop", ".svg"))
+            print("removed stale " .. basename($p))
+        end
+    end
+    refresh()
+end
+
+fn uninstall()
+    for $p in ours()
+        remove($p)
+        remove($icons_dir .. "/" .. replace(basename($p), ".desktop", ".svg"))
+        print("removed " .. basename($p))
+    end
+    refresh()
+end
+
+fn check()
+    $rc = 0
+    $have = ours()
+    for $src in sources()
+        $app = app_of($src)
+        $dst = $apps_dir .. "/dev.mixos." .. $app .. "-plasma.desktop"
+        if !contains($have, $dst) then
+            print("missing " .. $app)
+            $rc = 1
+        elif read_file($dst) != launcher($src, $app) then
+            print("stale   " .. $app)
+            $rc = 1
+        else
+            print("ok      " .. $app)
+        end
+    end
+    exit($rc)
+end
+
+$cmd = "install"
+if len(args()) > 0 then
+    $cmd = args()[0]
+end
+if $cmd == "install" then
+    install()
+elif $cmd == "remove" then
+    uninstall()
+elif $cmd == "check" then
+    check()
+else
+    print("usage: mix launchers/launchers.mix install|remove|check")
+    exit(2)
+end
